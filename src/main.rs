@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, sync::Arc};
 
 use anyhow::Result;
 use axum::{
@@ -9,9 +9,15 @@ use axum::{
 };
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
+use twilight_http::Client;
 use twilight_model::{
-    application::interaction::{Interaction, InteractionType},
-    http::interaction::{InteractionResponse, InteractionResponseType},
+    application::{
+        command::Command,
+        interaction::{Interaction, InteractionType},
+    },
+    guild::Permissions,
+    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
+    id::Id,
 };
 use verifier::Verifier;
 
@@ -20,6 +26,7 @@ mod verifier;
 #[derive(Clone)]
 struct AppState {
     verifier: Verifier,
+    client: Arc<Client>,
 }
 
 #[tokio::main]
@@ -37,8 +44,29 @@ async fn main() {
             .expect("INTERACTION_KEY must be set")
             .as_str(),
     );
+    let client = Arc::new(Client::new(
+        env::var("BOT_TOKEN").expect("Bot token must be set"),
+    ));
 
-    let state = AppState { verifier };
+    let state = AppState { verifier, client };
+
+    let current_user = state
+        .client
+        .current_user()
+        .await
+        .unwrap()
+        .model()
+        .await
+        .unwrap();
+
+    info!(
+        "Logged in as {}#{}",
+        current_user.name, current_user.discriminator
+    );
+
+    update_commands(state.client.clone())
+        .await
+        .expect("Could not update commands");
 
     let app = Router::new()
         .route("/_health", get(health))
@@ -51,6 +79,37 @@ async fn main() {
 
 async fn health() -> &'static str {
     "OK"
+}
+
+async fn update_commands(client: Arc<Client>) -> Result<()> {
+    let application_id = {
+        let response = client.current_user_application().await?;
+
+        response.model().await?.id
+    };
+
+    let guild_id = env::var("GUILD_ID");
+
+    match guild_id {
+        Ok(guild_id) => {
+            info!("Registering commands for guild {}", guild_id);
+            let guild_id = Id::new(guild_id.parse::<u64>().unwrap());
+            client
+                .interaction(application_id)
+                .create_guild_command(guild_id)
+                .chat_input("ping", "pings the bot")?
+                .await?;
+        }
+        _ => {
+            info!("Registering global commands");
+            client
+                .interaction(application_id)
+                .create_global_command()
+                .chat_input("ping", "pings the bot")?
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 #[axum::debug_handler]
@@ -85,8 +144,6 @@ async fn interaction_callback(
     }
     debug!("Signature is valid");
 
-    debug!("Body: {:?}", body);
-
     let interaction =
         serde_json::from_str::<Interaction>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -95,6 +152,43 @@ async fn interaction_callback(
             kind: InteractionResponseType::Pong,
             data: None,
         },
+        InteractionType::ApplicationCommand => {
+            if let Some(
+                twilight_model::application::interaction::InteractionData::ApplicationCommand(
+                    command,
+                ),
+            ) = interaction.data
+            {
+                debug!("Processing command: {:?}", command.name);
+                if command.name == "ping" {
+                    InteractionResponse {
+                        kind: InteractionResponseType::ChannelMessageWithSource,
+                        data: Some(InteractionResponseData {
+                            content: Some("Pong!".to_string()),
+                            ..Default::default()
+                        }),
+                    }
+                } else {
+                    warn!("Unhandled command: {:?}", command.name);
+                    InteractionResponse {
+                        kind: InteractionResponseType::ChannelMessageWithSource,
+                        data: Some(InteractionResponseData {
+                            content: Some("Unimplemented".to_string()),
+                            ..Default::default()
+                        }),
+                    }
+                }
+            } else {
+                warn!("Unhandled interaction type: {:?}", interaction.data);
+                InteractionResponse {
+                    kind: InteractionResponseType::ChannelMessageWithSource,
+                    data: Some(InteractionResponseData {
+                        content: Some("Unimplemented".to_string()),
+                        ..Default::default()
+                    }),
+                }
+            }
+        }
         _ => {
             return Err(StatusCode::BAD_REQUEST);
         }
