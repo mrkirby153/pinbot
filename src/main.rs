@@ -12,11 +12,10 @@ use tracing::{debug, info, warn};
 use twilight_http::Client;
 use twilight_model::{
     application::{
-        command::{Command, CommandType},
-        interaction::{Interaction, InteractionData, InteractionType},
+        command::CommandType,
+        interaction::{Interaction, InteractionType},
     },
     channel::{message::MessageFlags, Channel},
-    guild::Permissions,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{marker::GenericMarker, Id},
 };

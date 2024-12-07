@@ -17,6 +17,7 @@ fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct InvalidKey(ed25519_dalek::SignatureError);
 
 #[derive(Debug, Error)]
