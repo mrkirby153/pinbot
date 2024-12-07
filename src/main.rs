@@ -12,13 +12,15 @@ use tracing::{debug, info, warn};
 use twilight_http::Client;
 use twilight_model::{
     application::{
-        command::Command,
-        interaction::{Interaction, InteractionType},
+        command::{Command, CommandType},
+        interaction::{Interaction, InteractionData, InteractionType},
     },
+    channel::{message::MessageFlags, Channel},
     guild::Permissions,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
-    id::Id,
+    id::{marker::GenericMarker, Id},
 };
+use twilight_util::builder::command::CommandBuilder;
 use verifier::Verifier;
 
 mod verifier;
@@ -88,25 +90,25 @@ async fn update_commands(client: Arc<Client>) -> Result<()> {
         response.model().await?.id
     };
 
+    let client = client.interaction(application_id);
+
     let guild_id = env::var("GUILD_ID");
+
+    let commands = vec![
+        CommandBuilder::new("ping", "Pings the bot", CommandType::ChatInput).build(),
+        CommandBuilder::new("Pin/Unpin", "", CommandType::Message).build(),
+    ];
 
     match guild_id {
         Ok(guild_id) => {
             info!("Registering commands for guild {}", guild_id);
             let guild_id = Id::new(guild_id.parse::<u64>().unwrap());
-            client
-                .interaction(application_id)
-                .create_guild_command(guild_id)
-                .chat_input("ping", "pings the bot")?
-                .await?;
+
+            client.set_guild_commands(guild_id, &commands).await?;
         }
         _ => {
             info!("Registering global commands");
-            client
-                .interaction(application_id)
-                .create_global_command()
-                .chat_input("ping", "pings the bot")?
-                .await?;
+            client.set_global_commands(&commands).await?;
         }
     }
     Ok(())
@@ -168,12 +170,34 @@ async fn interaction_callback(
                             ..Default::default()
                         }),
                     }
+                } else if command.name == "Pin/Unpin" {
+                    match pin_unpin(
+                        state.client.clone(),
+                        interaction.channel.unwrap(),
+                        command.target_id.unwrap(),
+                    )
+                    .await
+                    {
+                        Ok(resp) => InteractionResponse {
+                            kind: InteractionResponseType::ChannelMessageWithSource,
+                            data: Some(resp),
+                        },
+                        Err(e) => InteractionResponse {
+                            kind: InteractionResponseType::ChannelMessageWithSource,
+                            data: Some(InteractionResponseData {
+                                content: Some(format!("Error: {:?}", e)),
+                                flags: Some(MessageFlags::EPHEMERAL),
+                                ..Default::default()
+                            }),
+                        },
+                    }
                 } else {
                     warn!("Unhandled command: {:?}", command.name);
                     InteractionResponse {
                         kind: InteractionResponseType::ChannelMessageWithSource,
                         data: Some(InteractionResponseData {
-                            content: Some("Unimplemented".to_string()),
+                            content: Some("Unhandled command".to_string()),
+                            flags: Some(MessageFlags::EPHEMERAL),
                             ..Default::default()
                         }),
                     }
@@ -184,6 +208,7 @@ async fn interaction_callback(
                     kind: InteractionResponseType::ChannelMessageWithSource,
                     data: Some(InteractionResponseData {
                         content: Some("Unimplemented".to_string()),
+                        flags: Some(MessageFlags::EPHEMERAL),
                         ..Default::default()
                     }),
                 }
@@ -195,4 +220,37 @@ async fn interaction_callback(
     };
     debug!("Response: {:?}", resp);
     Ok(Json(resp))
+}
+
+async fn pin_unpin(
+    client: Arc<Client>,
+    channel: Channel,
+    message_id: Id<GenericMarker>,
+) -> anyhow::Result<InteractionResponseData> {
+    debug!(
+        "Pinning message {:?} in channel {:?}",
+        message_id, channel.id
+    );
+
+    let message = client
+        .message(channel.id, message_id.cast())
+        .await?
+        .model()
+        .await?;
+
+    if message.pinned {
+        debug!("Unpinning message");
+        client.delete_pin(channel.id, message_id.cast()).await?;
+        Ok(InteractionResponseData {
+            content: Some(":pushpin: Message unpinned".to_string()),
+            ..Default::default()
+        })
+    } else {
+        debug!("Pinning message");
+        client.create_pin(channel.id, message_id.cast()).await?;
+        Ok(InteractionResponseData {
+            content: Some(":pushpin: Message pinned".to_string()),
+            ..Default::default()
+        })
+    }
 }
